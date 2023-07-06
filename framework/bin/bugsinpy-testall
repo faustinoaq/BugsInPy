@@ -1,0 +1,138 @@
+#!/bin/bash
+
+###bugsinpy-testall reproduces all the bugs for every project
+# test ok (reproduced successfully) test fail (unable to reproduce)
+# Full test logs in ~/projects/logs.txt
+# Output in ~/projects/output.csv
+
+usage="
+       -h
+             show this help
+       -c
+             cleanup ~ directory
+       -p
+             specify multiple project:start:end or project:end or project:
+             Ex;
+             pandas:75:100 (reproduce tests 75 to 100 for pandas)
+             black:5 ansible: (only reproduces test 5 for black and all for ansible)
+"
+
+case $1 in
+ -[h?] | --help)
+    echo "Usage: ${0##*/} [ --help ]"
+    echo "$usage"
+    exit 0;;
+ -c)
+    read -p "Are you sure? [y/n]" -n 1 -r
+    if [[ $REPLY =~ ^[Yy]$ ]]
+    then
+      rm -rfv ~/projects
+    fi
+    exit 0;;
+ -p)
+    projects="${@:2}";;
+esac
+
+mkdir -p ~/projects
+
+echo $projects | grep -q ":"
+if [[ $? -ne 0 ]]; then
+  projects=$(ls ~/BugsInPy/projects)
+fi
+
+echo "bugsinpy-testall reproduces all the bugs for every project"
+echo "test 'ok' means reproduced successfully, buggy version failed and fixed version passed"
+echo "test 'fail' means unable to reproduce, error happened or buggy version didn't fail test or fixed version didn't pass"
+echo "See full tests logs in ~/logs.txt"
+echo "See results in ~/projects/output.csv"
+echo "Reproducing bugs please wait ..."
+echo "---------------"
+if [[ ! -f "$HOME/projects/output.csv" ]]; then
+  echo "repo,bugid,test" | tee -a ~/projects/output.csv
+fi
+
+# Cleanup unfinished reproductions
+sed -i '/[0-9]$/d' ~/projects/output.csv
+
+# Iterate over the projects
+for project in $projects; do
+
+  # Get the number of bugs in the project
+  echo $projects | grep -q ":"
+  if [[ $? -ne 0 ]]; then
+    start=1
+    finish=$(ls ~/BugsInPy/projects/$project/bugs | wc -l)
+  else
+    start=$(echo $project | cut -d ":" -f 2)
+    finish=$(echo $project | cut -d ":" -f 3)
+    project=$(echo $project | cut -d ":" -f 1)
+    if [[ "$start" == "" ]]; then
+      finish=$(ls ~/BugsInPy/projects/$project/bugs | wc -l)
+      start=1
+    elif [[ "$finish" == "" ]]; then
+      finish=$start
+    fi
+  fi
+
+  echo "Working $finish bugs in project $project"  &>> ~/logs.txt
+
+  # For each bug, execute the test
+  for bug in $(seq $start $finish); do
+
+    grep "$project,$bug," ~/projects/output.csv
+    if [[ $? -eq 0 ]]; then
+      echo "$project bug $bug is already tested, remove entry manually in output.csv file or try -c to cleanup all"  &>> ~/logs.txt
+    else
+      if [[ ! -d "$HOME/BugsInPy/projects/$project/bugs/$bug" ]]; then
+        echo "$project has no bug $bug yet, skipping ..." &>> ~/logs.txt
+      else
+
+        printf "$project,$bug" | tee -a ~/projects/output.csv
+
+        # Test buggy (0) version
+        bugsinpy-checkout -p $project -v 0 -i $bug -w ~/projects &>> ~/logs.txt
+        cd ~/projects/$project
+        ###Required to use conda activate, included in docker continuumio/miniconda3
+        #. /opt/conda/etc/profile.d/conda.sh &>> ~/logs.txt
+        ###Setup proper python version already installed using miniconda
+        #bug_python_version=$(grep -o "3\..\.." "bugsinpy_bug.info") &>> ~/logs.txt
+        #conda create -n $bug_python_version -y python=$bug_python_version pytest dos2unix  &>> ~/logs.txt
+        #conda activate $bug_python_version &>> ~/logs.txt
+        # TODO: Develop custom fixes for failing libraries
+        # echo $work_dir | grep -q xyz
+        # if [[ $? -eq 0 ]]; then
+        #    conda install -y -c conda-forge xyz=2.2.5
+        # fi
+        #pip install decorator future six python_toolbox &>> ~/logs.txt
+
+        bugsinpy-compile &>> ~/logs.txt
+        bugsinpy-test &>> ~/logs.txt
+
+        # Make sure a failure is detected in buggy version and bug is reproducible
+        if [ ! -f "bugsinpy_fail.txt" ]; then
+          echo ",fail" | tee -a ~/projects/output.csv
+        else
+
+          # Test fixed (1) version
+          bugsinpy-checkout -p $project -v 1 -i $bug -w ~/projects &>> ~/logs.txt
+          cd ~/projects/$project
+          bugsinpy-compile &>> ~/logs.txt
+          bugsinpy-test &>> ~/logs.txt
+
+          # Test execution output and make sure fixed version passes test ok
+          if [ -f "bugsinpy_fail.txt" ]; then
+            echo ",fail" | tee -a ~/projects/output.csv
+          else
+            echo ",ok" | tee -a ~/projects/output.csv
+          fi
+        fi
+
+        ###Deactivate the environment
+        #conda deactivate
+      fi
+
+    fi
+  done
+done
+
+echo "done."
